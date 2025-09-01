@@ -2,11 +2,11 @@
 
 Proof of concept of Stokes I inversion stuff using Jax
 
-Using most recent versions of
+Using
 ```
-- jax
-- optax
-- jaxopt
+- jax==0.7.1
+- optax==0.2.5
+- jaxopt==0.8.5
 ```
 
 Currently only have populations for Fe I, using the partition functions fo Irwin
