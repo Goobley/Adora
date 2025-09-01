@@ -27,9 +27,10 @@ TODO:
 NOTES:
 - The `lte_pops.py` script is just a demo, not used for anything.
 - `voigt.py` should be ready to go for the full Voigt-Faraday.
-- `responses.py`: demo of just calculating responses.
+- `response_fn.py`: demo of just calculating responses.
 - `iterate.py`: LM demo (uses slow gradients).
 - `iterate_adam.py`: Uses a first-order ML optimiser.
+- `iterate_scipy.py`: Uses the jax compiled jacobian with the scipy trf optimiser.
 - This work has only been tested on CPU, but should also perform well on GPUs with fast fp64 support (e.g. A/H/B100).
 - Intensities are in units of kW/(m2 nm sr). Thus emissivities are kW/(m3 nm), and opacities are m-1. All other units are SI.
 
