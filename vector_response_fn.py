@@ -57,7 +57,6 @@ if __name__ == "__main__":
         )
     )
     intens = lte_rt_wave(lines, waves, dz, temperature, ne, nhtot, vz, vturb, b, gamma_b, chi_b)
-    # NOTE(cmo): I don't fully trust the scaling of the Stokes terms yet. Need to verify against another code.
 
     plt.figure()
     plt.plot(waves, intens[0] / intens[0, 0], label="I")
