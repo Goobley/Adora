@@ -22,6 +22,19 @@ class NodeSpec:
     n_chi_b: jdc.Static[int]
     n_interp: jdc.Static[int]
 
+    @property
+    def n_nodes(self):
+        return (
+            self.n_temperature +
+            self.n_ne +
+            self.n_nhtot +
+            self.n_vz +
+            self.n_vturb +
+            self.n_b +
+            self.n_gamma_b +
+            self.n_chi_b
+        )
+
     def unpack_nodes(self, nodes):
         running = 0
         temperature = nodes[running:running+self.n_temperature]
@@ -194,14 +207,14 @@ if __name__ == "__main__":
     nodes = NodeSpec(
         z_min = fal.z.min(),
         z_max = 1.6e6,
-        n_temperature=6,
-        n_ne=5,
-        n_nhtot=6,
-        n_vz=4,
-        n_vturb=2,
-        n_b=2,
-        n_gamma_b=2,
-        n_chi_b=2,
+        n_temperature=3,
+        n_ne=3,
+        n_nhtot=3,
+        n_vz=2,
+        n_vturb=1,
+        n_b=1,
+        n_gamma_b=1,
+        n_chi_b=1,
         n_interp=30
     )
 
@@ -277,7 +290,7 @@ if __name__ == "__main__":
     result = least_squares(
         jax.jit(lambda p: compute_residual_vmap(p, intens_ref, waves, lines, nodes).reshape(-1)),
         x0=starting_nodes,
-        jac=jax.jit(lambda p: compute_residual_jac_vmap(p, intens_ref, waves, lines, nodes).reshape(-1, 29)),
+        jac=jax.jit(lambda p: compute_residual_jac_vmap(p, intens_ref, waves, lines, nodes).reshape(-1, nodes.n_nodes)),
         method='trf',
         bounds=(min_params, max_params),
         verbose=2,
