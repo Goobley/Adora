@@ -60,8 +60,26 @@ if __name__ == "__main__":
     # NOTE(cmo): I don't fully trust the scaling of the Stokes terms yet. Need to verify against another code.
 
     plt.figure()
-    plt.plot(waves, intens[0] / intens[0, 0])
-    plt.plot(waves, intens[3] / intens[0, 0])
+    plt.plot(waves, intens[0] / intens[0, 0], label="I")
+    plt.plot(waves, intens[3] / intens[0, 0], label="V")
+
+    from lightweaver.rh_atoms import H_atom, Fe23_atom
+    fal_lw = Falc82()
+    fal_lw.B = np.ones(temperature.shape[0]) * 0.05
+    fal_lw.gammaB = np.ones(temperature.shape[0]) * 0.785
+    fal_lw.chiB = np.zeros(temperature.shape[0])
+    fal_lw.quadrature(3)
+
+    rad_set = lw.RadiativeSet([H_atom(), Fe23_atom()])
+    rad_set.set_detailed_static("Fe")
+    spect = rad_set.compute_wavelength_grid()
+    eq_pops = rad_set.compute_eq_pops(fal_lw)
+
+    ctx = lw.Context(fal_lw, spect, eq_pops)
+    Iquv_lw = ctx.compute_rays(wavelengths=np.array(waves), mus=[1.0], stokes=True)
+    plt.plot(waves, Iquv_lw[0] / Iquv_lw[0, 0], '--', label="I Lw")
+    plt.plot(waves, Iquv_lw[3] / Iquv_lw[0, 0], '--', label="V Lw")
+    plt.legend()
 
     lte_polarised_rt_response = jax.jit(
         jax.vmap(
