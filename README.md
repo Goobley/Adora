@@ -16,13 +16,14 @@ Currently only have populations for Fe I, using the partition functions fo Irwin
 
 TODO:
 - [ ] Use a better Van der Waals broadening (e.g. Unsoeld)
-- [ ] Zeeman splitting
-- [ ] Polarised formal solver (e.g. DELO-Constant)
+- [x] Zeeman splitting
+- [x] Polarised formal solver (e.g. DELO-Constant)
 - [ ] Partition functions for other elements
-- [ ] Second order fitter that uses fast gradient calculation
+- [x] Second order fitter that uses fast gradient calculation (yes, via scipy)
 - [ ] Reconstruction from nodes/splines
 - [ ] EOS (neural?)
 - [ ] Connecting to PINN for regularisation?
+- [ ] Validate values against existing inversion code.
 
 NOTES:
 - The `lte_pops.py` script is just a demo, not used for anything.

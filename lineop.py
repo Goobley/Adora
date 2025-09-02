@@ -1,3 +1,4 @@
+from fractions import Fraction
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -5,9 +6,10 @@ import astropy.constants as const
 import astropy.units as u
 import numpy as np
 from contop import lte_h_ion_fracs, continuum_opacity
-from voigt import voigt_H_re as voigt
+from voigt import voigt_H_re as voigt, voigt_H as voigt_HF
 import jax_dataclasses as jdc
 import lightweaver as lw
+from lightweaver.zeeman import lande_factor, fraction_range, zeeman_strength
 
 HC = const.h.value * const.c.value
 NM_TO_M = u.Unit('nm').to('m')
@@ -26,6 +28,7 @@ SQRT_PI = np.sqrt(np.pi)
 SAHA_CONST = ((2 * jnp.pi * const.m_e.value * const.k_B.value) / const.h.value**2)**1.5
 TWOHC2_NM5 = 2.0 * (const.h.to('kJ s') * const.c**2 / (1e-9**4)).value
 HC_KB_NM = (const.h * const.c / const.k_B).to('K nm').value
+DLAMBDA_B_CONST = (Q_ELE / (4.0 * jnp.pi * const.m_e * const.c.to('nm/s'))).value
 
 @jdc.pytree_dataclass
 class AtomicData:
@@ -42,6 +45,9 @@ class AtomicData:
     ei: jax.Array
     ej: jax.Array
     Aji: jax.Array
+    zeeman_alphas: jax.Array
+    zeeman_strengths: jax.Array
+    zeeman_shifts: jax.Array
 
 
 # https://github.com/HajimeKawahara/exojax/blob/master/src/exojax/database/atomllapi.py
@@ -132,10 +138,10 @@ def read_kurucz(kuruczf):
         np.array([""] * len(lines), dtype=object),
         np.zeros(len(lines)),
         np.zeros(len(lines)),
+        np.array([""] * len(lines), dtype=object),
         np.zeros(len(lines)),
         np.zeros(len(lines)),
-        np.zeros(len(lines)),
-        np.zeros(len(lines)),
+        np.array([""] * len(lines), dtype=object),
         np.zeros(len(lines)),
         np.zeros(len(lines)),
         np.zeros(len(lines)),
@@ -168,20 +174,87 @@ def read_kurucz(kuruczf):
         iion[i] = int(species[i].split(".")[1]) + 1
         elower[i] = float(line[24:36])
         jlower[i] = float(line[36:41])
+        labellower[i] = str(line[42:52])
         eupper[i] = float(line[52:64])
         jupper[i] = float(line[64:69])
+        labelupper[i] = str(line[70:80])
         gamRad[i] = float(line[80:86])
         gamSta[i] = float(line[86:92])
         gamvdW[i] = float(line[92:98])
 
-    elower_inverted = np.where((eupper - elower) > 0, elower, eupper)
-    eupper_inverted = np.where((eupper - elower) > 0, eupper, elower)
-    jlower_inverted = np.where((eupper - elower) > 0, jlower, jupper)
-    jupper_inverted = np.where((eupper - elower) > 0, jupper, jlower)
+    L_map = {'S': 0, 'P': 1, 'D': 2, 'F': 3, 'G': 4, 'H': 5, 'I': 6}
+
+    multiplicity_lower = np.array([int(l[-2:-1]) for l in labellower])
+    multiplicity_upper = np.array([int(l[-2:-1]) for l in labelupper])
+    L_lower = np.array([L_map[l[-1]] for l in labellower])
+    L_upper = np.array([L_map[l[-1]] for l in labelupper])
+
+    not_flip = (eupper - elower) > 0
+    elower_inverted = np.where(not_flip, elower, eupper)
+    eupper_inverted = np.where(not_flip, eupper, elower)
+    jlower_inverted = np.where(not_flip, jlower, jupper)
+    jupper_inverted = np.where(not_flip, jupper, jlower)
+    L_lower_inverted = np.where(not_flip, L_lower, L_upper)
+    L_upper_inverted = np.where(not_flip, L_upper, L_lower)
+    multiplicity_lower_inverted = np.where(not_flip, multiplicity_lower, multiplicity_upper)
+    multiplicity_upper_inverted = np.where(not_flip, multiplicity_upper, multiplicity_lower)
+
     elower = elower_inverted
     eupper = eupper_inverted
-    jlower = jlower_inverted
-    jupper = jupper_inverted
+    J_lower = jlower_inverted
+    J_upper = jupper_inverted
+    L_lower = L_lower_inverted
+    L_upper = L_upper_inverted
+    multiplicity_lower = multiplicity_lower_inverted
+    multiplicity_upper = multiplicity_upper_inverted
+
+    zeeman_alpha_list = []
+    zeeman_strength_list = []
+    zeeman_shift_list = []
+
+    for l in range(len(lines)):
+        Jl = Fraction.from_float(J_lower[i]).limit_denominator(2)
+        Ju = Fraction.from_float(J_upper[i]).limit_denominator(2)
+        Ll = int(L_lower[i])
+        Lu = int(L_upper[i])
+        Sl = Fraction(int(multiplicity_lower[i]) - 1, 2)
+        Su = Fraction(int(multiplicity_upper[i]) - 1, 2)
+
+        assert (Jl <= Ll + Sl) and (Ju <= Lu + Su), f"Cannot apply LS coupling to line {l}"
+
+        # from lightweaver
+        gLl = lande_factor(Jl, Ll, Sl)
+        gLu = lande_factor(Ju, Lu, Su)
+        alpha = []
+        strength = []
+        shift = []
+        norm = np.zeros(3)
+
+        for ml in fraction_range(-Jl, Jl+1):
+            for mu in fraction_range(-Ju, Ju+1):
+                if abs(ml - mu) <= 1.0:
+                    alpha.append(int(ml - mu))
+                    shift.append(gLl*ml - gLu*mu)
+                    strength.append(zeeman_strength(Ju, mu, Jl, ml))
+                    norm[alpha[-1]+1] += strength[-1]
+        alpha = np.array(alpha, dtype=np.int32)
+        strength = np.array(strength)
+        shift = np.array(shift)
+        strength /= norm[alpha + 1]
+
+        zeeman_alpha_list.append(alpha)
+        zeeman_strength_list.append(strength)
+        zeeman_shift_list.append(shift)
+    max_zeeman_components = max([z.shape[0] for z in zeeman_alpha_list])
+
+    zeeman_alphas = np.zeros((len(lines), max_zeeman_components), dtype=np.int32)
+    zeeman_strengths = np.zeros((len(lines), max_zeeman_components))
+    zeeman_shifts = np.zeros((len(lines), max_zeeman_components))
+    for i, (alpha, strength, shift) in enumerate(zip(zeeman_alpha_list, zeeman_strength_list, zeeman_shift_list)):
+        length = zeeman_alpha_list[i].shape[0]
+        zeeman_alphas[i, :length] = alpha
+        zeeman_strengths[i, :length] = strength
+        zeeman_shifts[i, :length] = shift
 
     wlaa = np.where(wlnmair < 200, wlnmair * 10, air_to_vac(wlnmair * 10))
     wl_vac = np.where(wlnmair < 200, wlnmair, air_to_vac(wlnmair * 10) * 0.1)
@@ -213,25 +286,11 @@ def read_kurucz(kuruczf):
         gj=jnp.array(gupper),
         ei=jnp.array(elower),
         ej=jnp.array(eupper),
-        Aji=jnp.array(A)
+        Aji=jnp.array(A),
+        zeeman_alphas=jnp.array(zeeman_alphas),
+        zeeman_strengths=jnp.array(zeeman_strengths),
+        zeeman_shifts=jnp.array(zeeman_shifts)
     )
-
-    # return (
-    #     A,
-    #     wl_vac,
-    #     elower,
-    #     eupper,
-    #     glower,
-    #     gupper,
-    #     jlower,
-    #     jupper,
-    #     ielem,
-    #     iion,
-    #     gamRad,
-    #     gamSta,
-    #     gamvdW,
-    # )
-
 
 def thermal_vel(mass, temperature):
     r"""
@@ -324,6 +383,111 @@ def emis_opac_line(
     chi = eta / Sfn
     return eta, chi
 
+def polarised_line_compoment(
+        alpha,
+        strength,
+        shift,
+        adamp,
+        v_scalar,
+        v_b,
+):
+    # phi_sb, phi_pi, phi_sr = 0.0, 0.0, 0.0
+    # psi_sb, psi_pi, psi_sr = 0.0, 0.0, 0.0
+    components = jnp.zeros((2, 3))
+
+    vh, vf = voigt_HF(adamp, v_scalar - shift * v_b)
+    components = components.at[0, alpha+1].set(strength * vh)
+    components = components.at[1, alpha+1].set(strength * vf)
+    return components
+
+def emis_opac_polarised_line(
+        mass,
+        abund,
+        lambda0,
+        log_grad,
+        log_gs,
+        log_gw,
+        gj,
+        ej,
+        Aji,
+        zeeman_alpha,
+        zeeman_strength,
+        zeeman_shift,
+        wave,
+        temperature,
+        ne,
+        nhtot,
+        vel,
+        vturb,
+        b,
+        cos_gamma,
+        sin_2chi,
+        cos_2chi,
+):
+    mag_width = DLAMBDA_B_CONST * lambda0**2 # [nm]
+
+    nhi, nhii = lte_h_ion_fracs(temperature, ne, nhtot)
+    dop_width = doppler_width(lambda0, mass, temperature, vturb)
+    gamma = gamma_from_broadening(log_grad, log_gs, log_gw, temperature, ne, nhi)
+    adamp = damping_from_gamma(gamma, wave, dop_width)
+    v = ((wave - lambda0) + (vel * lambda0) * INV_C) / dop_width
+    v_b = mag_width * b / dop_width
+
+    sin2_gamma = 1.0 - cos_gamma**2
+    voigt_norm = 1.0 / (SQRT_PI * dop_width)
+
+    components = jax.vmap(
+        polarised_line_compoment,
+        in_axes=[0, 0, 0, None, None, None]
+    )(
+        zeeman_alpha,
+        zeeman_strength,
+        zeeman_shift,
+        adamp,
+        v,
+        v_b
+    ).sum(axis=0)
+
+    phi_sigma = components[0, 0] + components[0, 2]
+    phi_delta = 0.5 * components[0, 1] - 0.25 * phi_sigma
+    phi = (phi_delta * sin2_gamma + 0.5 * phi_sigma) * voigt_norm
+
+    phi_q = phi_delta * sin2_gamma * cos_2chi * voigt_norm
+    phi_u = phi_delta * sin2_gamma * sin_2chi * voigt_norm
+    phi_v = 0.5 * (components[0, 2] - components[0, 0]) * cos_gamma * voigt_norm
+
+    psi_sigma = components[1, 0] + components[1, 2]
+    psi_delta = 0.5 * components[1, 1] - 0.25 * psi_sigma
+
+    psi_q = psi_delta * sin2_gamma * cos_2chi * voigt_norm
+    psi_u = psi_delta * sin2_gamma * sin_2chi * voigt_norm
+    psi_v = 0.5 * (components[1, 2] - components[1, 0]) * cos_gamma * voigt_norm
+
+    Sfn = planck(wave, temperature)
+    nj = fei_pop_i(abund, temperature, ne, nhtot, gj, ej)
+    hnu_4pi = HC_FOURPI_KJ_NM / wave
+    eta_no_prof = nj * hnu_4pi * Aji
+    chi_no_prof = eta_no_prof / Sfn
+
+    chi = jnp.array([
+        chi_no_prof * phi,
+        chi_no_prof * phi_q,
+        chi_no_prof * phi_u,
+        chi_no_prof * phi_v,
+        chi_no_prof * psi_q,
+        chi_no_prof * psi_u,
+        chi_no_prof * psi_v,
+    ])
+    eta = jnp.array([
+        eta_no_prof * phi,
+        eta_no_prof * phi_q,
+        eta_no_prof * phi_u,
+        eta_no_prof * phi_v,
+    ])
+
+    return eta, chi
+
+
 def emis_opac(adata: AtomicData, wave, temperature, ne, nhtot, vel, vturb):
     """
     Compute total emissivity/opacity for a atmospheric point
@@ -370,33 +534,92 @@ def emis_opac(adata: AtomicData, wave, temperature, ne, nhtot, vel, vturb):
         vturb
     )
 
-    # line_eta = 0.0
-    # line_chi = 0.0
-    # for i in range(adata.mass.shape[0]):
-    #     e, c = emis_opac_line(
-    #         adata.mass[i],
-    #         adata.abund[i],
-    #         adata.lambda0[i],
-    #         adata.log_grad[i],
-    #         adata.log_gs[i],
-    #         adata.log_gw[i],
-    #         adata.gj[i],
-    #         adata.ej[i],
-    #         adata.Aji[i],
-    #         wave,
-    #         temperature,
-    #         ne,
-    #         nhtot,
-    #         vel,
-    #         vturb
-    #     )
-    #     line_eta = line_eta + e
-    #     line_chi = line_chi + c
-
     eta = eta_cont + line_eta.sum()
     chi = chi_cont + line_chi.sum()
     return eta, chi
 
+def emis_opac_polarised(
+        adata: AtomicData,
+        wave,
+        temperature,
+        ne,
+        nhtot,
+        vel,
+        vturb,
+        b,
+        gamma_b,
+        chi_b,
+    ):
+    """
+    Compute total emissivity/opacity for a atmospheric point
+
+    adata : AtomicData
+        The dataclass containing the atomic data
+    wave : float
+        The wavelength at which to compute [nm]
+    temperature : float
+        Temperature [K]
+    ne : float
+        Electron density [m-3]
+    nhtot : float
+        Total H density [m-3]
+    vel : float
+        LOS velocity [m/s]
+    vturb : float
+        microturbulent velocity [m/s]
+    b : float
+        magnetic field [T]
+    gamma_b : float
+        inclination of magnetic field [radians]
+    chi_b : float
+        azimuth of magnetic field [radians]
+
+    Returns
+    -------
+    Total emissivity, total opacity, from continuum and all lines. (Stokes form)
+    [eps_I, eps_Q, eps_U, eps_V], [eta_I, eta_Q, eta_U, eta_V, rho_Q, rho_U, rho_V]
+    """
+    chi_cont = continuum_opacity(wave, temperature, ne, nhtot)
+    B_planck = planck(wave, temperature)
+    eta_cont = chi_cont * B_planck
+
+    # NOTE(cmo): This is only correct in the muz=1 case
+    cos_gamma = jnp.cos(gamma_b)
+    cos_2chi = jnp.cos(2.0 * chi_b)
+    sin_2chi = jnp.sin(2.0 * chi_b)
+
+    axis_spec = (*[0]*12, *[None]*10)
+    line_eta, line_chi = jax.vmap(emis_opac_polarised_line, in_axes=axis_spec)(
+        adata.mass,
+        adata.abund,
+        adata.lambda0,
+        adata.log_grad,
+        adata.log_gs,
+        adata.log_gw,
+        adata.gj,
+        adata.ej,
+        adata.Aji,
+        adata.zeeman_alphas,
+        adata.zeeman_strengths,
+        adata.zeeman_shifts,
+        wave,
+        temperature,
+        ne,
+        nhtot,
+        vel,
+        vturb,
+        b,
+        cos_gamma,
+        sin_2chi,
+        cos_2chi,
+    )
+    eta = line_eta.sum(axis=0)
+    chi = line_chi.sum(axis=0)
+
+    eta = eta.at[0].set(eta[0] + eta_cont)
+    chi = chi.at[0].set(chi[0] + chi_cont)
+
+    return eta, chi
 
 
 def Q_FeI(T):
@@ -510,4 +733,6 @@ if __name__ == "__main__":
     # plt.plot(wave, b)
     # plt.plot(wave, b_lw, '--')
 
-    emis_opac(kd, 630.15, 5000, 1e22, 1e25, 0.0, 2e3)
+    eta_s, chi_s = emis_opac(kd, 630.324, 5000, 1e22, 1e25, 0.0, 2e3)
+
+    eta, chi = emis_opac_polarised(kd, 630.31, 5000, 1e22, 1e25, 0.0, 2e3, 0.1, 0.0, 0.0)
